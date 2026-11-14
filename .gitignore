@@ -14,3 +14,8 @@ node_modules/
 .DS_Store
 
 /solucao
+
+# Local secrets and generated files
+.env
+*.tfvars
+infra/terraform/.kube/

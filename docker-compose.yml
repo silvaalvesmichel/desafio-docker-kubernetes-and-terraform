@@ -1,0 +1,88 @@
+# Local stack used only to understand the application (official images, no Dockerfile).
+# Start order: db -> migrate -> api -> web.
+# The database password comes from the POSTGRES_PASSWORD variable (see .env.example).
+
+x-db-env: &db-env
+  POSTGRES_USER: ${POSTGRES_USER:-mural}
+  POSTGRES_DB: ${POSTGRES_DB:-mural}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (copy .env.example to .env)}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      <<: *db-env
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready alone also succeeds during the init phase; forcing TCP (-h) only
+      # succeeds once the real server is accepting connections.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-mural}
+      PGDATABASE: ${POSTGRES_DB:-mural}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (copy .env.example to .env)}
+    volumes:
+      - ./app/api/migrations:/migrations:ro
+    # One-shot: applies every migration in lexical order and exits.
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        for f in /migrations/*.sql; do
+          echo "applying $$f"
+          psql -v ON_ERROR_STOP=1 -f "$$f"
+        done
+    restart: "no"
+
+  api:
+    image: golang:1.23-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    working_dir: /src
+    command: ["go", "run", "."]
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-mural}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (copy .env.example to .env)}@db:5432/${POSTGRES_DB:-mural}?sslmode=disable
+    volumes:
+      - ./app/api:/src:ro
+      - go-cache:/go/pkg/mod
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      # "go run" downloads the modules and compiles before the server is up.
+      start_period: 120s
+
+  web:
+    image: nginx:1.27-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Rendered by envsubst into the nginx template at container start.
+      API_UPSTREAM: api:8080
+    volumes:
+      - ./app/web:/usr/share/nginx/html:ro
+      - ./app/web/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "8080:8080"
+
+volumes:
+  db-data:
+  go-cache:

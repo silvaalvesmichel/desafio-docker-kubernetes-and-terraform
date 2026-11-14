@@ -1,0 +1,142 @@
+name: ciclo
+
+# Runs the whole delivery on a clean machine: compose, image sizes and the
+# terraform apply -> apply -> destroy cycle. Triggered manually or by verify/* branches.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "verify/**"
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the stack
+        run: |
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" > .env
+          docker compose up -d
+
+      - name: Wait for the Mural
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://localhost:8080/api/messages > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker compose ps -a
+          docker compose logs
+          exit 1
+
+      - name: Use the application
+        run: |
+          curl -fsS http://localhost:8080/ | grep -qi "<html"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"author":"ci","content":"compose"}' http://localhost:8080/api/messages
+          curl -fsS http://localhost:8080/api/messages | grep -q '"content":"compose"'
+          docker compose ps -a
+          echo "::notice title=compose::4 services up in order, message created and listed through the nginx proxy"
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+  cluster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+
+      - name: Tool versions
+        run: |
+          docker version --format 'docker {{.Server.Version}}'
+          kind version
+          kubectl version --client
+          helm version --short
+          terraform version
+
+      - name: Generate the database password
+        run: echo "TF_VAR_db_password=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: First apply (from scratch)
+        run: |
+          terraform apply -auto-approve -input=false -no-color | tee /tmp/apply1.log
+          echo "::notice title=apply 1::$(grep -E '^Apply complete' /tmp/apply1.log)"
+
+      - name: The Mural answers through the Ingress
+        run: |
+          R="--resolve mural.localtest.me:80:127.0.0.1"
+          curl -fsS $R http://mural.localtest.me/ | grep -qi "<html"
+          curl -fsS $R http://mural.localtest.me/api/messages | tee /tmp/messages.json
+          grep -q "Bem-vindo" /tmp/messages.json
+          curl -fsS $R -X POST -H 'Content-Type: application/json' \
+            -d '{"author":"ci","content":"cluster"}' http://mural.localtest.me/api/messages
+          curl -fsS $R http://mural.localtest.me/api/messages | grep -q '"content":"cluster"'
+          echo "::notice title=ingress::/ served by web, /api served by api, seed present, message created"
+
+      - name: Cluster state
+        run: |
+          export KUBECONFIG="$PWD/.kube/config"
+          kubectl get nodes --show-labels
+          kubectl -n mural get all,ingress,pvc,secret,configmap,job
+          kubectl -n mural logs job/mural-migrate
+          # Liveness must be /healthz and readiness /readyz.
+          kubectl -n mural get deploy mural-api \
+            -o jsonpath='{.spec.template.spec.containers[0].livenessProbe.httpGet.path} {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}' \
+            | grep -x "/healthz /readyz"
+          RESTARTS=$(kubectl -n mural get pods -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.restartCount}{"\n"}{end}{end}' | sort -n | tail -1)
+          echo "::notice title=pods::$(kubectl -n mural get pods --no-headers | wc -l) pods in mural, max restarts $RESTARTS"
+
+      - name: Image sizes
+        run: |
+          docker pull -q golang:1.23-alpine
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E '^(golang:1.23-alpine|mural-api|mural-web)' | tee /tmp/sizes.txt
+          echo "::notice title=image sizes::$(paste -sd' ' /tmp/sizes.txt | sed 's/ \([a-z]\)/ | \1/g')"
+
+      - name: Second apply (idempotency)
+        run: |
+          terraform apply -auto-approve -input=false -no-color | tee /tmp/apply2.log
+          grep -q "Apply complete! Resources: 0 added, 0 changed, 0 destroyed." /tmp/apply2.log
+          echo "::notice title=apply 2::$(grep -E '^Apply complete' /tmp/apply2.log)"
+
+      - name: Destroy
+        run: |
+          terraform destroy -auto-approve -input=false -no-color | tee /tmp/destroy.log
+          echo "::notice title=destroy::$(grep -E '^Destroy complete' /tmp/destroy.log)"
+
+      - name: Nothing left behind
+        run: |
+          test -z "$(kind get clusters 2>/dev/null)"
+          test -z "$(docker ps -aq --filter label=io.x-k8s.kind.cluster)"
+          test "$(terraform state list | wc -l)" -eq 0
+          echo "::notice title=leftovers::no kind cluster, no node container, empty state"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          export KUBECONFIG="$PWD/.kube/config"
+          kubectl get pods -A -o wide || true
+          kubectl -n mural describe pods || true
+          kubectl -n mural logs job/mural-migrate || true
+          kubectl -n traefik logs deploy/traefik --tail=50 || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true

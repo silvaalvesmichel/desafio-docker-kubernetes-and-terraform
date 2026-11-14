@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (git-ignored) or export TF_VAR_db_password instead.
+db_password = ""
+
+# Optional overrides:
+# host       = "mural.localtest.me"
+# http_port  = 80
+# https_port = 443

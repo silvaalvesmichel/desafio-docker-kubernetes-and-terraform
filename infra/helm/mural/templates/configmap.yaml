@@ -1,0 +1,20 @@
+# Non-sensitive configuration shared by the workloads.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mural.config.fullname" . }}
+  labels:
+    {{- include "mural.labels" . | nindent 4 }}
+data:
+  # API
+  PORT: {{ .Values.api.port | quote }}
+  # Web: upstream rendered into the nginx template by envsubst.
+  API_UPSTREAM: {{ printf "%s:%v" (include "mural.api.fullname" .) .Values.api.service.port | quote }}
+  # Postgres server
+  POSTGRES_DB: {{ .Values.postgres.database | quote }}
+  POSTGRES_USER: {{ .Values.postgres.user | quote }}
+  # psql client (migration Job)
+  PGHOST: {{ include "mural.postgres.fullname" . | quote }}
+  PGPORT: {{ .Values.postgres.port | quote }}
+  PGDATABASE: {{ .Values.postgres.database | quote }}
+  PGUSER: {{ .Values.postgres.user | quote }}

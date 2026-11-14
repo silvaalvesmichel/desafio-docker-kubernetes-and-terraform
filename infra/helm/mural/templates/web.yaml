@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mural.web.fullname" . }}
+  labels:
+    {{- include "mural.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mural.selectorLabels" (dict "ctx" . "component" "web") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.web.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mural.web.fullname" . }}
+  labels:
+    {{- include "mural.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mural.selectorLabels" (dict "ctx" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mural.selectorLabels" (dict "ctx" . "component" "web") | nindent 8 }}
+      annotations:
+        # Roll the pods when the upstream changes (it is rendered only at start-up).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: web
+          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.web.port }}
+          env:
+            - name: API_UPSTREAM
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mural.config.fullname" . }}
+                  key: API_UPSTREAM
+          # Both probes hit the static index: nginx being up is all the front needs.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}

@@ -1,0 +1,82 @@
+# Default values for the mural chart.
+
+nameOverride: ""
+fullnameOverride: ""
+
+api:
+  image:
+    repository: mural-api
+    tag: local
+    pullPolicy: IfNotPresent
+  replicas: 2
+  # Port the Go process listens on (PORT env var).
+  port: 8080
+  service:
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
+web:
+  image:
+    repository: mural-web
+    tag: local
+    pullPolicy: IfNotPresent
+  replicas: 2
+  # Port fixed by app/web/nginx.conf.template.
+  port: 8080
+  service:
+    port: 80
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+postgres:
+  image:
+    repository: postgres
+    tag: 16-alpine
+    pullPolicy: IfNotPresent
+  port: 5432
+  database: mural
+  user: mural
+  # Required and intentionally empty: supply it at install time
+  # (--set postgres.password=... or the Terraform variable db_password).
+  # It is stored only in the Secret rendered by templates/secret.yaml.
+  password: ""
+  persistence:
+    size: 1Gi
+    # Empty = the cluster default StorageClass ("standard" on kind).
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+migrate:
+  # Uses the Postgres image (psql client). Runs as a post-install/post-upgrade hook.
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+ingress:
+  enabled: true
+  className: traefik
+  host: mural.localtest.me
+  annotations: {}
