@@ -86,12 +86,19 @@ jobs:
       - name: The Mural answers through the Ingress
         run: |
           R="--resolve mural.localtest.me:80:127.0.0.1"
-          curl -fsS $R http://mural.localtest.me/ | grep -qi "<html"
-          curl -fsS $R http://mural.localtest.me/api/messages | tee /tmp/messages.json
-          grep -q "Bem-vindo" /tmp/messages.json
-          curl -fsS $R -X POST -H 'Content-Type: application/json' \
-            -d '{"author":"ci","content":"cluster"}' http://mural.localtest.me/api/messages
-          curl -fsS $R http://mural.localtest.me/api/messages | grep -q '"content":"cluster"'
+          U=http://mural.localtest.me
+          # No retries on purpose: a finished apply must mean the Mural already answers.
+          fail() { echo "::error title=ingress::$1"; exit 1; }
+          CODE=$(curl -s $R -o /tmp/index.html -w '%{http_code}' $U/) || true
+          [ "$CODE" = 200 ] || fail "GET / returned $CODE: $(head -c 200 /tmp/index.html | tr '\n' ' ')"
+          grep -qi "<html" /tmp/index.html || fail "GET / is not the front: $(head -c 200 /tmp/index.html | tr '\n' ' ')"
+          CODE=$(curl -s $R -o /tmp/messages.json -w '%{http_code}' $U/api/messages) || true
+          [ "$CODE" = 200 ] || fail "GET /api/messages returned $CODE: $(head -c 200 /tmp/messages.json | tr '\n' ' ')"
+          grep -q "Bem-vindo" /tmp/messages.json || fail "seed missing: $(head -c 200 /tmp/messages.json | tr '\n' ' ')"
+          CODE=$(curl -s $R -o /tmp/created.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"author":"ci","content":"cluster"}' $U/api/messages) || true
+          [ "$CODE" = 201 ] || fail "POST /api/messages returned $CODE: $(head -c 200 /tmp/created.json | tr '\n' ' ')"
+          curl -s $R $U/api/messages | grep -q '"content":"cluster"' || fail "created message not listed"
           echo "::notice title=ingress::/ served by web, /api served by api, seed present, message created"
 
       - name: Cluster state
