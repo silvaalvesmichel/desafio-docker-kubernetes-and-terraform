@@ -36,6 +36,7 @@ locals {
   # Non-sensitive chart values. The password goes separately through set_sensitive.
   mural_values = yamlencode({
     api = {
+      autoscaling = { enabled = var.autoscaling_enabled }
       image = {
         repository = local.images.api.repository
         tag        = local.images.api.tag
@@ -157,6 +158,29 @@ resource "helm_release" "traefik" {
 }
 
 # ---------------------------------------------------------------------------
+# Metrics (bonus): source of the CPU usage the API autoscaler reads
+# ---------------------------------------------------------------------------
+
+resource "helm_release" "metrics_server" {
+  count = var.autoscaling_enabled ? 1 : 0
+
+  name       = "metrics-server"
+  repository = "https://kubernetes-sigs.github.io/metrics-server/"
+  chart      = "metrics-server"
+  version    = var.metrics_server_chart_version
+  namespace  = "kube-system"
+  wait       = true
+  timeout    = 600
+
+  values = [yamlencode({
+    # The kubelet certificates of a kind node are self-signed.
+    args = ["--kubelet-insecure-tls"]
+  })]
+
+  depends_on = [kind_cluster.this]
+}
+
+# ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
 
@@ -188,6 +212,7 @@ resource "helm_release" "mural" {
   depends_on = [
     terraform_data.image,
     helm_release.traefik,
+    helm_release.metrics_server,
   ]
 }
 

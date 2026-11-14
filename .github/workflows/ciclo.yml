@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Start the stack
         run: |
@@ -53,9 +53,9 @@ jobs:
       run:
         working-directory: infra/terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
 
@@ -118,6 +118,41 @@ jobs:
           terraform apply -auto-approve -input=false -no-color | tee /tmp/apply2.log
           grep -q "Apply complete! Resources: 0 added, 0 changed, 0 destroyed." /tmp/apply2.log
           echo "::notice title=apply 2::$(grep -E '^Apply complete' /tmp/apply2.log)"
+
+      - name: HPA scales the API under load
+        run: |
+          export KUBECONFIG="$PWD/.kube/config"
+          # Wait until the HPA can read the CPU metric.
+          for i in $(seq 1 60); do
+            CPU=$(kubectl -n mural get hpa mural-api -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}' 2>/dev/null || true)
+            if [ -n "$CPU" ]; then break; fi
+            sleep 5
+          done
+          kubectl -n mural get hpa mural-api
+          BEFORE=$(kubectl -n mural get deploy mural-api -o jsonpath='{.status.replicas}')
+
+          docker run --rm --network host --add-host mural.localtest.me:127.0.0.1 \
+            -v "$GITHUB_WORKSPACE/infra/k6:/scripts:ro" -e BASE_URL=http://mural.localtest.me \
+            grafana/k6 run --quiet /scripts/load.js > /tmp/k6.log 2>&1 &
+
+          PEAK=$BEFORE
+          for i in $(seq 1 36); do
+            sleep 5
+            NOW=$(kubectl -n mural get deploy mural-api -o jsonpath='{.status.replicas}')
+            if [ "$NOW" -gt "$PEAK" ]; then PEAK=$NOW; fi
+            kubectl -n mural get hpa mural-api --no-headers
+          done
+          wait
+          tail -25 /tmp/k6.log
+          kubectl -n mural describe hpa mural-api | tail -15
+          test "$PEAK" -gt "$BEFORE"
+          echo "::notice title=hpa::API scaled from $BEFORE to $PEAK replicas under k6 load ($(grep -E 'http_reqs' /tmp/k6.log | tr -s ' ' | head -1))"
+
+      - name: Still idempotent after the HPA changed the replica count
+        run: |
+          terraform apply -auto-approve -input=false -no-color | tee /tmp/apply3.log
+          grep -q "Apply complete! Resources: 0 added, 0 changed, 0 destroyed." /tmp/apply3.log
+          echo "::notice title=apply 3 (after scale-out)::$(grep -E '^Apply complete' /tmp/apply3.log)"
 
       - name: Destroy
         run: |

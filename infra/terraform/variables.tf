@@ -62,3 +62,15 @@ variable "traefik_chart_version" {
   type        = string
   default     = "42.4.0"
 }
+
+variable "autoscaling_enabled" {
+  description = "Installs metrics-server and enables the HorizontalPodAutoscaler of the API."
+  type        = bool
+  default     = true
+}
+
+variable "metrics_server_chart_version" {
+  description = "Version of the metrics-server Helm chart."
+  type        = string
+  default     = "3.14.0"
+}

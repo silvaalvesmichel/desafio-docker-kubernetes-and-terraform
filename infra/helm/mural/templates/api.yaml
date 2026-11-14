@@ -22,7 +22,9 @@ metadata:
     {{- include "mural.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "mural.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
