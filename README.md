@@ -111,7 +111,7 @@ carga continua em `0 added, 0 changed, 0 destroyed`.
 
 Prova de escala, com o k6 (`infra/k6/load.js`, 50 usuários virtuais por 3 minutos em
 `GET /api/messages` pelo Ingress): a API foi de **2 para 6 réplicas**, atendendo cerca de
-2.800 requisições por segundo. Para repetir: `make load` em um terminal e `make status` em outro.
+3 a 4 mil requisições por segundo (2.800 e 4.000 nas duas execuções medidas). Para repetir: `make load` em um terminal e `make status` em outro.
 
 **Makefile.** `make up` (init + apply), `make down` (destroy), `make status` e `make load`.
 
