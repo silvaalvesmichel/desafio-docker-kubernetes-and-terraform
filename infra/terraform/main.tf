@@ -216,7 +216,7 @@ resource "helm_release" "mural" {
   ]
 }
 
-# Makes "apply finished" mean "the Mural answers": waits for the rollouts.
+# Waits for the rollouts, so a failed start-up shows up as a failed apply.
 resource "terraform_data" "rollout" {
   for_each = toset(["api", "web"])
 
@@ -228,5 +228,21 @@ resource "terraform_data" "rollout" {
 
   provisioner "local-exec" {
     command = "kubectl --kubeconfig \"${kind_cluster.this.kubeconfig_path}\" --namespace ${helm_release.mural.namespace} rollout status deployment/${helm_release.mural.name}-${each.key} --timeout=300s"
+  }
+}
+
+# Makes "apply finished" mean "the Mural answers". Ready pods are not enough: the
+# ingress controller still needs a moment to pick up the new endpoints, so this asks
+# for the front and the API through the same door the browser uses.
+resource "terraform_data" "smoke" {
+  for_each = {
+    web = "/"
+    api = "/api/messages"
+  }
+
+  triggers_replace = [for name in sort(keys(terraform_data.rollout)) : terraform_data.rollout[name].id]
+
+  provisioner "local-exec" {
+    command = "curl --silent --show-error --fail --retry 30 --retry-delay 2 --retry-all-errors --max-time 5 --resolve ${var.host}:${var.http_port}:127.0.0.1 ${local.url}${each.value}"
   }
 }

@@ -6,7 +6,7 @@ O estado-alvo está em [`docs/arquitetura.md`](docs/arquitetura.md).
 
 ## Pré-requisitos
 
-Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm e Terraform (>= 1.6) no `PATH`.
+Docker, [kind](https://kind.sigs.k8s.io/), kubectl, curl e Terraform (>= 1.6) no `PATH`.
 As portas 80 e 443 da máquina precisam estar livres (ou troque por `http_port` / `https_port`).
 
 ## Como rodar
@@ -22,7 +22,7 @@ terraform apply      # 0 added, 0 changed, 0 destroyed
 terraform destroy    # remove tudo
 ```
 
-Depois do primeiro `apply`, abra <http://mural.localtest.me>.
+Depois do primeiro `apply`, abra <http://mural.localtest.me>. Com `make`: `make up` e `make down`.
 
 A senha também pode ir num `terraform.tfvars` (ignorado pelo git; modelo em
 `terraform.tfvars.example`). Para usar o `kubectl`:
@@ -42,10 +42,10 @@ Sobe na ordem banco → migração → API → front, só com imagens oficiais.
 
 | Imagem | Tamanho |
 |--------|---------|
-| Antes: `golang:1.23-alpine` + código (`go run`) | _a medir_ |
-| Depois: `app/docker/api.Dockerfile` (`scratch`) | _a medir_ |
+| Antes: `golang:1.23-alpine`, a base do `go run` (sem contar código e módulos) | 370 MB |
+| Depois: `app/docker/api.Dockerfile` (`scratch`) | 12,8 MB |
 
-Medido com `docker image ls` (`golang:1.23-alpine` e `mural-api`).
+Medido com `docker image ls` na execução do workflow descrito em [Verificação](#verificação): cerca de 29 vezes menor.
 
 ## Decisões
 
@@ -90,8 +90,9 @@ Medido com `docker image ls` (`golang:1.23-alpine` e `mural-api`).
 - **Namespace `mural`** criado pelo provider `kubernetes`; o chart entra por `helm_release`.
 - **`wait = false` no release do Mural.** Com `wait`, o Helm esperaria a API ficar `Ready` antes
   de rodar o hook de migração, e ela só fica `Ready` depois dele. O Helm continua bloqueando até
-  o Job terminar, e em seguida o Terraform espera o rollout da API e do front com
-  `kubectl rollout status`. Assim, `apply` concluído significa Mural respondendo.
+  o Job terminar. Em seguida o Terraform espera o rollout (`kubectl rollout status`) e pede `/` e
+  `/api/messages` pelo Ingress até responderem, porque o Traefik ainda leva um instante para
+  enxergar os pods prontos. Assim, `apply` concluído significa Mural respondendo.
 - **Senha** pela variável sensível `db_password`, sem default, repassada ao chart com
   `set_sensitive`. Ela fica no state do Terraform, que é local e ignorado pelo git.
 
@@ -99,3 +100,34 @@ Medido com `docker image ls` (`golang:1.23-alpine` e `mural-api`).
 
 Trocar `db_password` depois da primeira instalação atualiza o Secret, mas não a senha já gravada
 no banco (o Postgres só a define ao inicializar o volume). Para trocar, rode `destroy` e `apply`.
+
+## Bônus
+
+**HPA.** O chart traz um `HorizontalPodAutoscaler` da API (CPU a 60% do request, de 2 a 6
+réplicas), ligado por `api.autoscaling.enabled`. O Terraform liga por padrão
+(`autoscaling_enabled`) e instala o metrics-server, de onde o HPA lê o consumo. Com o HPA ligado
+o Deployment não declara `replicas`, então o Terraform não desfaz a escala: o `apply` depois da
+carga continua em `0 added, 0 changed, 0 destroyed`.
+
+Prova de escala, com o k6 (`infra/k6/load.js`, 50 usuários virtuais por 3 minutos em
+`GET /api/messages` pelo Ingress): a API foi de **2 para 6 réplicas**, atendendo cerca de
+2.800 requisições por segundo. Para repetir: `make load` em um terminal e `make status` em outro.
+
+**Makefile.** `make up` (init + apply), `make down` (destroy), `make status` e `make load`.
+
+## Verificação
+
+O workflow [`ciclo`](.github/workflows/ciclo.yml) roda a entrega inteira numa máquina limpa do
+GitHub Actions e falha se algum passo não bater:
+
+| Passo | Resultado |
+|-------|-----------|
+| `docker compose up` | 4 serviços no ar, recado criado e listado pelo proxy do nginx |
+| Primeiro `terraform apply` | `11 added, 0 changed, 0 destroyed`; `/` e `/api` respondem pelo Ingress |
+| Pods | nenhum restart; liveness em `/healthz`, readiness em `/readyz` |
+| Segundo `terraform apply` | `0 added, 0 changed, 0 destroyed` |
+| Carga com k6 | API escala de 2 para 6 réplicas |
+| `terraform apply` depois da escala | `0 added, 0 changed, 0 destroyed` |
+| `terraform destroy` | `11 destroyed`; sem cluster, sem container, state vazio |
+
+Ele roda por disparo manual ou em branches `verify/*`.
